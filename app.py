@@ -4,19 +4,21 @@ from youtube_transcript_api import YouTubeTranscriptApi
 from anthropic import Anthropic
 import http.cookiejar
 
+# 1. Setup Page Title
 st.title("🤖 Sponsor Scout: Creator Outreach Agent")
 
-# 1. Secure API Key Retrieval from Advanced Settings
+# 2. Secure API Key Retrieval (Pulls from Streamlit Advanced Settings)
 api_key = st.secrets.get("ANTHROPIC_API_KEY")
 if not api_key:
-    st.error("API Key not found in Secrets! Add it to Advanced Settings.")
+    st.error("API Key not found! Add 'ANTHROPIC_API_KEY' to your Streamlit Secrets.")
     st.stop()
 
-video_url = st.text_input("Paste YouTube Video URL")
+# 3. Input UI
+video_url = st.text_input("Paste YouTube Video URL", placeholder="https://www.youtube.com/watch?v=...")
 
 if st.button("Generate Pitch"):
     try:
-        # 2. Robust Video ID Extraction
+        # A. Video ID Extraction
         video_id = None
         if "v=" in video_url:
             video_id = video_url.split("v=")[1].split("&")[0]
@@ -24,36 +26,44 @@ if st.button("Generate Pitch"):
             video_id = video_url.split("/")[-1].split("?")[0]
         
         if not video_id:
-            st.error("Invalid Video ID.")
+            st.error("Invalid Video ID. Please check your link.")
             st.stop()
 
-        # 3. Fetch Transcript with Session & Cookies
+        # B. Fetch Transcript with Session & Cookies
         session = requests.Session()
+        # Ensure 'youtube_cookies.txt' is uploaded to your GitHub repo
         cj = http.cookiejar.MozillaCookieJar('youtube_cookies.txt')
         cj.load(ignore_discard=True, ignore_expires=True)
         session.cookies = cj
         
-        # Initialize and fetch using the modern 2026 API structure
         ytt_api = YouTubeTranscriptApi(http_client=session)
-        transcript_data = ytt_api.fetch(video_id)
+        fetched_obj = ytt_api.fetch(video_id)
         
-        # 4. Join Text using Attribute Access to fix 'subscriptable' error
-        try:
-            context = " ".join([item.text for item in transcript_data])[:4000]
-        except (AttributeError, TypeError):
-            context = " ".join([item['text'] for item in transcript_data])[:4000]
+        # --- THE UNIVERSAL FIX for subscriptable error ---
+        # Converts the 2026 'FetchedTranscript' object back to a standard list of dictionaries
+        transcript_data = fetched_obj.to_raw_data()
+        context = " ".join([item['text'] for item in transcript_data])[:6000]
+        # --------------------------------------------------------------
 
-        # 5. Run Claude Agent
+        # C. Run Claude Agent with UPDATED Model ID
         client = Anthropic(api_key=api_key)
+        # Model 'claude-3-5-sonnet-20240620' is retired; use 'claude-sonnet-4-5'
         response = client.messages.create(
-            model="claude-3-5-sonnet-20240620",
-            max_tokens=1024,
-            system="You are a Talent Manager. Match the video content to a tech sponsor.",
+            model="claude-sonnet-4-5", 
+            max_tokens=1500,
+            system="You are a Talent Manager. Create a sponsorship pitch for this video.",
             messages=[{"role": "user", "content": f"Video Transcript: {context}"}]
         )
 
         st.success("Pitch Generated!")
+        st.markdown("---")
         st.markdown(response.content[0].text)
         
     except Exception as e:
-        st.error(f"Error: {e}")
+        # Specific help for common 2026 errors
+        if "404" in str(e):
+            st.error("Model Error: Ensure you are using 'claude-sonnet-4-5' as the model name.")
+        elif "youtube_cookies.txt" in str(e):
+            st.error("Cookie Error: Please ensure 'youtube_cookies.txt' is uploaded to GitHub.")
+        else:
+            st.error(f"Error: {e}")
