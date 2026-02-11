@@ -1,3 +1,4 @@
 streamlit
-youtube-transcript-api
+requests
+youtube-transcript-api>=1.2.0
 anthropic
