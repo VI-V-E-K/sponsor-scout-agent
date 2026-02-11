@@ -34,7 +34,7 @@ if st.button("Generate Pitch"):
         # Pass the session with cookies to the API
         ytt_api = YouTubeTranscriptApi(http_client=session)
         transcript_data = ytt_api.fetch(video_id)
-        context = " ".join([item['text'] for item in transcript_data])[:4000]
+        context = " ".join([item.text for item in transcript_data])[:4000] 
         # ---------------------------------------------------------------------------
 
         # B. Run Claude Agent
@@ -51,3 +51,4 @@ if st.button("Generate Pitch"):
         
     except Exception as e:
         st.error(f"Error: {e}")
+
