@@ -13,12 +13,10 @@ st.title("🤖 Sponsor Scout: Creator Outreach Agent")
 st.subheader("Turn YouTube videos into high-value brand pitches in seconds.")
 
 # 2. Secure API Key Retrieval
-# This pulls directly from "Advanced Settings > Secrets"
-# No sidebar or code-level key storage is required.
 try:
     api_key = st.secrets["ANTHROPIC_API_KEY"]
 except KeyError:
-    st.error("API Key not found! Please add ANTHROPIC_API_KEY to your Streamlit Advanced Settings.")
+    st.error("API Key not found in Secrets.")
     st.stop()
 
 # 3. Input URL
@@ -26,7 +24,7 @@ video_url = st.text_input("Paste YouTube Video URL", placeholder="https://www.yo
 
 if st.button("Generate Pitch"):
     try:
-        # --- Robust Video ID Extraction ---
+        # Robust Video ID Extraction
         video_id = None
         if "v=" in video_url:
             video_id = video_url.split("v=")[1].split("&")[0]
@@ -34,32 +32,20 @@ if st.button("Generate Pitch"):
             video_id = video_url.split("/")[-1].split("?")[0]
         elif "/shorts/" in video_url:
             video_id = video_url.split("/")[-1].split("?")[0]
-
+        
         if not video_id:
-            st.error("Could not find a valid Video ID. Please check the URL.")
+            st.error("Invalid Video ID.")
             st.stop()
 
-        # --- THE SOLUTION: Initialize and use .fetch() ---
-        try:
-            # 1. Initialize the API object
-            ytt_api = YouTubeTranscriptApi()
+        # --- THE FIX: Pass cookies to the constructor, not fetch() ---
+        # 1. Initialize with the cookie file path
+        ytt_api = YouTubeTranscriptApi(cookie_path='youtube_cookies.txt')
+        
+        # 2. Call fetch() without the cookies argument
+        transcript_data = ytt_api.fetch(video_id)
+        context = " ".join([item['text'] for item in transcript_data])[:4000]
 
-            # 2. Use .fetch() instead of .get_transcript()
-            # This also supports your cookies for bypassing blocks
-            context_list = ytt_api.fetch(
-                video_id,
-                cookies='youtube_cookies.txt'
-            )
-
-            # 3. Join the text as before
-            context = " ".join([item['text'] for item in context_list])[:4000]
-
-        except AttributeError:
-            # Fallback for older versions if fetch() isn't recognized
-            context_list = YouTubeTranscriptApi.get_transcript(video_id, cookies='youtube_cookies.txt')
-            context = " ".join([item['text'] for item in context_list])[:4000]
-
-        # B. Run Claude 3.5 Agent
+        # B. Run Claude Agent
         client = Anthropic(api_key=api_key)
         response = client.messages.create(
             model="claude-3-5-sonnet-20240620",
@@ -68,14 +54,11 @@ if st.button("Generate Pitch"):
             messages=[{"role": "user", "content": f"Video Transcript: {context}"}]
         )
 
-        # C. Display Result
         st.success("Pitch Generated!")
         st.markdown(response.content[0].text)
-
+        
     except Exception as e:
-        if "list index out of range" in str(e).lower():
-            st.error("Error: URL format not recognized. Please use a standard YouTube link.")
-        elif "credit balance" in str(e).lower():
-            st.error("Error: Your Anthropic account balance is $0. Please add $5 to your console.")
+        if "credit balance" in str(e).lower():
+            st.error("Error: Your Anthropic account balance is $0.")
         else:
             st.error(f"Error: {e}")
