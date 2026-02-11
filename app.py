@@ -7,7 +7,7 @@ import http.cookiejar
 # 1. Setup Page Title
 st.title("🤖 Sponsor Scout: Creator Outreach Agent")
 
-# 2. Secure API Key Retrieval (Pulls from Streamlit Advanced Settings)
+# 2. Secure API Key Retrieval
 api_key = st.secrets.get("ANTHROPIC_API_KEY")
 if not api_key:
     st.error("API Key not found! Add 'ANTHROPIC_API_KEY' to your Streamlit Secrets.")
@@ -29,29 +29,37 @@ if st.button("Generate Pitch"):
             st.error("Invalid Video ID. Please check your link.")
             st.stop()
 
-        # B. Fetch Transcript with Session & Cookies
+        # B. THE SESSION FIX: Load Cookies Manually
         session = requests.Session()
-        # Ensure 'youtube_cookies.txt' is uploaded to your GitHub repo
-        cj = http.cookiejar.MozillaCookieJar('youtube_cookies.txt')
-        cj.load(ignore_discard=True, ignore_expires=True)
-        session.cookies = cj
+        # Set custom headers to look more like a real browser
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
         
+        # Load your youtube_cookies.txt (Netscape/Mozilla format)
+        try:
+            cj = http.cookiejar.MozillaCookieJar('youtube_cookies.txt')
+            cj.load(ignore_discard=True, ignore_expires=True)
+            session.cookies = cj
+        except FileNotFoundError:
+            st.error("Error: 'youtube_cookies.txt' not found in your GitHub repo.")
+            st.stop()
+        
+        # C. Fetch Transcript using the HTTP Client
         ytt_api = YouTubeTranscriptApi(http_client=session)
         fetched_obj = ytt_api.fetch(video_id)
         
-        # --- THE UNIVERSAL FIX for subscriptable error ---
-        # Converts the 2026 'FetchedTranscript' object back to a standard list of dictionaries
+        # Convert to raw data to ensure it is subscriptable
         transcript_data = fetched_obj.to_raw_data()
         context = " ".join([item['text'] for item in transcript_data])[:6000]
-        # --------------------------------------------------------------
 
-        # C. Run Claude Agent with UPDATED Model ID
+        # D. Run Claude Agent with NEW 2026 Model ID
         client = Anthropic(api_key=api_key)
-        # Model 'claude-3-5-sonnet-20240620' is retired; use 'claude-sonnet-4-5'
+        # Note: 'claude-3-5-sonnet-20240620' is retired. Use 'claude-sonnet-4-5'
         response = client.messages.create(
             model="claude-sonnet-4-5", 
             max_tokens=1500,
-            system="You are a Talent Manager. Create a sponsorship pitch for this video.",
+            system="You are a Talent Manager. Create a professional sponsorship pitch.",
             messages=[{"role": "user", "content": f"Video Transcript: {context}"}]
         )
 
@@ -60,10 +68,9 @@ if st.button("Generate Pitch"):
         st.markdown(response.content[0].text)
         
     except Exception as e:
-        # Specific help for common 2026 errors
         if "404" in str(e):
-            st.error("Model Error: Ensure you are using 'claude-sonnet-4-5' as the model name.")
-        elif "youtube_cookies.txt" in str(e):
-            st.error("Cookie Error: Please ensure 'youtube_cookies.txt' is uploaded to GitHub.")
+            st.error("Model Error: Your model ID is retired. Ensure you use 'claude-sonnet-4-5'.")
+        elif "youtube_cookies" in str(e).lower():
+            st.error("Cookie Error: YouTube is blocking your cloud IP. Your cookies may be expired.")
         else:
             st.error(f"Error: {e}")
