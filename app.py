@@ -6,7 +6,6 @@ logging.basicConfig(level=logging.DEBUG)
 os.write(1, b"APP STARTING...\n") 
 
 import streamlit as st
-# Rest of your code...import streamlit as st
 import os
 from youtube_transcript_api import YouTubeTranscriptApi
 from anthropic import Anthropic
@@ -27,14 +26,16 @@ if st.button("Generate Pitch") and api_key:
     try:
         # A. Fetch Transcript
         video_id = video_url.split("v=")[1].split("&")[0]
-        ytt_api = YouTubeTranscriptApi()
-        transcript_obj = ytt_api.fetch(video_id)
-        context = " ".join([item.text for item in transcript_obj])[:4000] # Limit context
+        
+        # CHANGED: Added cookie support to bypass YouTube blocking
+        # Ensure 'youtube_cookies.txt' is uploaded to your GitHub repo
+        context_list = YouTubeTranscriptApi.get_transcript(video_id, cookies='youtube_cookies.txt')
+        context = " ".join([item['text'] for item in context_list])[:4000] # Limit context
 
-        # B. Run Claude 4.6 Agent
+        # B. Run Claude 3.5 Agent
         client = Anthropic(api_key=api_key)
         response = client.messages.create(
-            model="claude-opus-4-6",
+            model="claude-3-5-sonnet-20240620",
             max_tokens=1024,
             system="You are a Talent Manager. Match the video content to a tech sponsor like Cursor or Vercel.",
             messages=[{"role": "user", "content": f"Video Transcript: {context}"}]
@@ -45,4 +46,8 @@ if st.button("Generate Pitch") and api_key:
         st.markdown(response.content[0].text)
         
     except Exception as e:
-        st.error(f"Error: {e}")
+        # Added specific billing error check to help you know when to add credits
+        if "credit balance" in str(e).lower():
+            st.error("Error: Your Anthropic account balance is $0. Please add $5 to your console.")
+        else:
+            st.error(f"Error: {e}")
