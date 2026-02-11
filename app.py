@@ -6,17 +6,17 @@ import http.cookiejar
 
 st.title("🤖 Sponsor Scout: Creator Outreach Agent")
 
-# Secure API Key Retrieval
+# 1. Secure API Key Retrieval from Advanced Settings
 api_key = st.secrets.get("ANTHROPIC_API_KEY")
 if not api_key:
-    st.error("API Key not found in Secrets!")
+    st.error("API Key not found in Secrets! Add it to Advanced Settings.")
     st.stop()
 
 video_url = st.text_input("Paste YouTube Video URL")
 
 if st.button("Generate Pitch"):
     try:
-        # A. Video ID Extraction
+        # 2. Robust Video ID Extraction
         video_id = None
         if "v=" in video_url:
             video_id = video_url.split("v=")[1].split("&")[0]
@@ -27,24 +27,23 @@ if st.button("Generate Pitch"):
             st.error("Invalid Video ID.")
             st.stop()
 
-        # B. Fetch Transcript using Session + Cookies
+        # 3. Fetch Transcript with Session & Cookies
         session = requests.Session()
-        # Ensure you have uploaded 'youtube_cookies.txt' to your GitHub
         cj = http.cookiejar.MozillaCookieJar('youtube_cookies.txt')
         cj.load(ignore_discard=True, ignore_expires=True)
         session.cookies = cj
         
+        # Initialize and fetch using the modern 2026 API structure
         ytt_api = YouTubeTranscriptApi(http_client=session)
         transcript_data = ytt_api.fetch(video_id)
         
-        # C. Join Text using Object Attribute access
-        # This fixes the 'not subscriptable' error
+        # 4. Join Text using Attribute Access to fix 'subscriptable' error
         try:
             context = " ".join([item.text for item in transcript_data])[:4000]
-        except AttributeError:
+        except (AttributeError, TypeError):
             context = " ".join([item['text'] for item in transcript_data])[:4000]
 
-        # D. Run Claude Agent
+        # 5. Run Claude Agent
         client = Anthropic(api_key=api_key)
         response = client.messages.create(
             model="claude-3-5-sonnet-20240620",
