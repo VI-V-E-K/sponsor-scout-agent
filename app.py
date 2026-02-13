@@ -1,6 +1,9 @@
 import os
 import streamlit as st
 import traceback
+import requests
+import http.cookiejar
+import re
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import RequestBlocked, TranscriptsDisabled, NoTranscriptFound
 from anthropic import Anthropic
@@ -18,7 +21,8 @@ st.set_page_config(
     layout="wide"
 )
 
-MAX_TRANSCRIPT_CHARS = 45_000
+# Increased for 2026 long-context models (approx 200k tokens)
+MAX_TRANSCRIPT_CHARS = 800_000
 
 # =========================================================
 # STYLES
@@ -53,7 +57,7 @@ st.markdown('<div class="subtitle">AI-powered creator sponsorship pitch generato
 
 try:
     api_key = st.secrets.get("ANTHROPIC_API_KEY")
-except StreamlitSecretNotFoundError:
+except (StreamlitSecretNotFoundError, KeyError):
     api_key = os.environ.get("ANTHROPIC_API_KEY")
 
 if not api_key:
@@ -65,18 +69,40 @@ if not api_key:
 # =========================================================
 
 def extract_video_id(url: str) -> str | None:
-    if "v=" in url:
-        return url.split("v=")[1].split("&")[0]
-    if "youtu.be/" in url:
-        return url.split("/")[-1].split("?")[0]
-    if "shorts/" in url:
-        return url.split("shorts/")[1].split("?")[0]
-    return None
+    # Regex for universal support (Shorts, mobile, desktop)
+    video_id_match = re.search(r"(?:v=|\/)([0-9A-Za-z_-]{11}).*", url)
+    return video_id_match.group(1) if video_id_match else None
 
 
 def get_full_transcript(video_id: str) -> str:
-    transcript = YouTubeTranscriptApi.get_transcript(video_id)
-    return " ".join(t["text"] for t in transcript)
+    """Fetches transcript using a browser-emulated session to bypass IP blocks."""
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+    })
+    
+    # Load Netscape-format cookies to bypass cloud IP bans
+    try:
+        cj = http.cookiejar.MozillaCookieJar('youtube_cookies.txt')
+        cj.load(ignore_discard=True, ignore_expires=True)
+        session.cookies = cj
+    except FileNotFoundError:
+        pass
+
+    # FIX: Call list_transcripts as a Class Method
+    try:
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id, http_client=session)
+        try:
+            transcript = transcript_list.find_transcript(['en'])
+        except:
+            # Fallback to translation if English is not original
+            first = next(iter(transcript_list))
+            transcript = first.translate('en')
+            
+        data = transcript.fetch()
+        return " ".join(t["text"] for t in data)
+    except Exception as e:
+        raise RuntimeError(f"Could not fetch transcript for {video_id}: {str(e)}")
 
 
 def analyze_with_improved_claude(transcript: str, video_count: int) -> str:
@@ -84,21 +110,13 @@ def analyze_with_improved_claude(transcript: str, video_count: int) -> str:
     saas_text = format_for_claude_prompt()
 
     system_prompt = f"""
-You are an elite sponsorship strategist who closes brand deals for creators.
-
-You do NOT summarize.
-You SELL alignment and revenue.
+You are an elite sponsorship strategist.
+Analyze the full transcript provided within <transcript> tags.
 
 ONLY use companies from this database:
 {saas_text}
 
-Rules:
-- Be confident and decisive
-- No generic language
-- Tie insights to transcript evidence
-- Weak matches must be called out
-
-Output structure (mandatory):
+Output structure:
 1. CREATOR SNAPSHOT
 2. TOP 3 SPONSOR MATCHES (ranked)
 3. MONEY ANGLE
@@ -108,85 +126,41 @@ Output structure (mandatory):
     client = Anthropic(api_key=api_key)
 
     try:
+        # Using 2026 stable model ID for long-context support
         message = client.messages.create(
-            model="claude-3-5-sonnet-latest",
-            max_tokens=7000,
+            model="claude-sonnet-4-5",
+            max_tokens=4000,
             system=system_prompt,
             messages=[{
                 "role": "user",
-                "content": f"""
-Analyze these YouTube transcript(s) and generate a sponsorship pitch.
-
-Videos analyzed: {video_count}
-Transcript length (truncated): {len(safe_transcript):,} chars
-
-TRANSCRIPT:
-{safe_transcript}
-"""
+                "content": f"Analyze these {video_count} videos.\n\n<transcript>{safe_transcript}</transcript>"
             }]
         )
+        return message.content[0].text
     except Exception as e:
         raise RuntimeError(f"Claude API error: {e}")
-
-    if not message.content:
-        raise RuntimeError("Claude returned empty content")
-
-    text_blocks = [
-        block.text for block in message.content
-        if hasattr(block, "text") and block.text
-    ]
-
-    if not text_blocks:
-        raise RuntimeError("Claude response contained no readable text")
-
-    return "\n\n".join(text_blocks)
-
-# =========================================================
-# SIDEBAR
-# =========================================================
-
-with st.sidebar:
-    st.markdown("## 🚀 Features")
-    st.markdown("""
-- 50+ SaaS companies  
-- Multi-video analysis  
-- Realistic pricing  
-- Ready-to-send outreach emails  
-""")
 
 # =========================================================
 # MAIN UI
 # =========================================================
 
-video_urls = st.text_area(
-    "Paste YouTube video URLs (one per line)",
-    height=120
-)
-
+video_urls = st.text_area("Paste YouTube video URLs (one per line)", height=120)
 show_debug = st.checkbox("Show debug info")
 
 if st.button("🚀 Generate Sponsorship Pitch", use_container_width=True):
-
     urls = [u.strip() for u in video_urls.splitlines() if u.strip()]
     if not urls:
         st.error("Please enter at least one YouTube URL.")
         st.stop()
 
-    valid_videos = []
-    for url in urls:
-        vid = extract_video_id(url)
-        if vid:
-            valid_videos.append(vid)
-        else:
-            st.warning(f"Invalid URL skipped: {url}")
-
+    valid_videos = [vid for url in urls if (vid := extract_video_id(url))]
+    
     if not valid_videos:
-        st.error("No valid YouTube URLs found.")
+        st.error("No valid YouTube IDs found.")
         st.stop()
 
     progress = st.progress(0)
     status = st.empty()
-
     transcripts = []
 
     try:
@@ -197,13 +171,10 @@ if st.button("🚀 Generate Sponsorship Pitch", use_container_width=True):
 
         combined_transcript = "\n\n".join(transcripts)
 
-        status.text("🤖 Analyzing with Claude 3.5 Sonnet (20–40 seconds)…")
+        status.text("🧠 Analyzing with Claude (Long Context Mode)...")
         progress.progress(0.9)
 
-        pitch = analyze_with_improved_claude(
-            combined_transcript,
-            len(transcripts)
-        )
+        pitch = analyze_with_improved_claude(combined_transcript, len(transcripts))
 
         progress.progress(1.0)
         status.text("✅ Done")
@@ -213,9 +184,9 @@ if st.button("🚀 Generate Sponsorship Pitch", use_container_width=True):
         st.markdown(pitch)
 
         st.download_button(
-            "📥 Download as Markdown",
+            "📥 Download Pitch",
             pitch,
-            file_name="sponsorship_pitch.md",
+            file_name="pitch.md",
             mime="text/markdown"
         )
 
