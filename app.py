@@ -1,19 +1,45 @@
 import os
 import streamlit as st
-import json
 from youtube_transcript_api import YouTubeTranscriptApi
+from youtube_transcript_api._errors import RequestBlocked, TranscriptsDisabled, NoTranscriptFound
 from anthropic import Anthropic
 import traceback
 from streamlit.errors import StreamlitSecretNotFoundError
+from saas_database import SAAS_DATABASE, format_for_claude_prompt
 
 # Page config
-st.set_page_config(page_title="Sponsor Scout", page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Sponsor Scout Pro", page_icon="🤖", layout="wide")
 
-# 1. Setup Page Title
-st.title("🤖 Sponsor Scout: AI-Powered Creator Outreach Agent")
-st.markdown("**Analyze YouTube creators and generate personalized sponsorship pitches matching them with ideal SaaS partners**")
+# Custom CSS for better UI
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: bold;
+        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        margin-bottom: 0.5rem;
+    }
+    .subtitle {
+        color: #6c757d;
+        font-size: 1.1rem;
+        margin-bottom: 2rem;
+    }
+    .stat-box {
+        background: #f8f9fa;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        border-left: 4px solid #667eea;
+    }
+</style>
+""", unsafe_allow_html=True)
 
-# 2. Secure API Key Retrieval
+# Title
+st.markdown('<p class="main-header">🤖 Sponsor Scout Pro</p>', unsafe_allow_html=True)
+st.markdown('<p class="subtitle">AI-Powered Creator Outreach Agent - Generate perfect sponsorship pitches for any YouTube channel</p>', unsafe_allow_html=True)
+
+# Secure API Key Retrieval
 try:
     api_key = st.secrets.get("ANTHROPIC_API_KEY")
 except StreamlitSecretNotFoundError:
@@ -22,34 +48,6 @@ except StreamlitSecretNotFoundError:
 if not api_key:
     st.error("⚠️ API Key not found! Add 'ANTHROPIC_API_KEY' to your Streamlit Secrets or environment variables.")
     st.stop()
-
-# 3. SaaS Companies Database (from your research doc)
-SAAS_COMPANIES = """
-**Cursor** - Latest: Cursor 2.0 with Composer model, multi-agent execution (up to 8 parallel agents), BugBot debugging assistant
-- Ideal Customer: Full-stack developers, AI engineers, React/TypeScript developers, teams working on complex codebases
-- Pain Point: Developers spend too much time on repetitive coding tasks, boilerplate generation, cross-file refactoring
-- Why Sponsor: Vibe coding is about flow state and productivity—exactly what Cursor enables
-
-**Vercel** - Latest: AI SDK 6 with agents, tool approval, MCP support, reranking; v0 AI UI generator for React/Next.js; Python SDK
-- Ideal Customer: Next.js developers, React developers, AI application builders, frontend engineers who want to ship AI-powered features fast
-- Pain Point: Building production-ready AI features requires complex integration of LLMs, streaming, tool calling, and state management
-- Why Sponsor: Vercel's v0 generates UI from prompts and AI SDK enables conversational interfaces—perfect for live-coding demos
-
-**Supabase** - Latest: Enhanced pgvector support, automatic embeddings via Edge Functions, unified vector + relational data storage, AI toolkit integration
-- Ideal Customer: AI application developers, full-stack developers building RAG systems, developers who need vector search with traditional databases
-- Pain Point: AI apps need vector databases for embeddings but managing separate vector DBs adds complexity and cost
-- Why Sponsor: Every vibe coding project needs a backend. Showing how to add AI-powered semantic search or RAG to apps in minutes demonstrates real value
-
-**Replit** - Latest: Agent 3 with 200-minute autonomous runtime, self-testing, agent generation, Design Mode, Fast Build mode, ChatGPT integration
-- Ideal Customer: No-code/low-code creators, product managers, beginner developers, entrepreneurs who want to build apps without deep coding knowledge
-- Pain Point: People have great app ideas but lack coding skills or time. Traditional development requires months of learning and iteration
-- Why Sponsor: Vibe coding is about describing what you want and watching it get built—literally Replit's tagline. Live demos of Agent 3 building full apps from prompts would blow viewers' minds
-
-**v0 by Vercel** - Latest: Composite AI model with AutoFix, 512K token context, shadcn/ui integration, image-to-code generation, agent-powered app building
-- Ideal Customer: React/Next.js frontend developers, UI/UX designers who code, developers prototyping landing pages or dashboards, Tailwind CSS users
-- Pain Point: Creating polished UI components from scratch is time-consuming and repetitive. Developers waste hours on boilerplate styling and responsive design
-- Why Sponsor: The visual, immediate nature of v0 (type prompt → see UI) is perfect for video content. Showing how to go from design screenshot to production-ready React code in seconds demonstrates the magic of vibe coding
-"""
 
 # Helper Functions
 def extract_video_id(url):
@@ -62,142 +60,354 @@ def extract_video_id(url):
         return url.split("shorts/")[1].split("?")[0]
     return None
 
-def get_full_transcript(video_id):
-    """Get full video transcript without character limits"""
+def get_full_transcript_with_fallback(video_id, use_cookies=False):
+    """
+    Get full video transcript with multiple fallback strategies
+    
+    Strategy 1: Try direct API call (no auth)
+    Strategy 2: Try with cookies if enabled
+    Strategy 3: Try with different languages
+    """
+    
+    # Strategy 1: Direct API call (works ~70% of time)
     try:
+        st.info("🔄 Attempting transcript fetch (Method 1: Direct API)...")
         transcript_list = YouTubeTranscriptApi.get_transcript(video_id)
         full_text = " ".join([item['text'] for item in transcript_list])
-        return full_text, len(full_text)
-    except Exception as e:
-        raise Exception(f"Transcript fetch failed: {str(e)}")
-
-def analyze_with_claude(transcript, video_count=1):
-    """Send full transcript to Claude for analysis with structured output"""
+        return full_text, len(full_text), "direct_api"
     
-    system_prompt = f"""You are an expert talent manager specializing in tech creator sponsorships and SaaS partnerships.
+    except RequestBlocked:
+        st.warning("⚠️ Method 1 failed (IP blocked). Trying fallback methods...")
+    
+    except (TranscriptsDisabled, NoTranscriptFound):
+        raise Exception("This video has no transcript available (captions disabled)")
+    
+    # Strategy 2: Try with cookies (if file exists)
+    if use_cookies and os.path.exists('youtube_cookies.txt'):
+        try:
+            st.info("🔄 Attempting with cookies (Method 2)...")
+            import http.cookiejar
+            import requests
+            
+            session = requests.Session()
+            cj = http.cookiejar.MozillaCookieJar('youtube_cookies.txt')
+            cj.load(ignore_discard=True, ignore_expires=True)
+            session.cookies = cj
+            
+            ytt = YouTubeTranscriptApi(http_client=session)
+            fetched = ytt.fetch(video_id)
+            transcript_list = fetched.to_raw_data() if hasattr(fetched, "to_raw_data") else list(fetched)
+            full_text = " ".join([item['text'] for item in transcript_list])
+            return full_text, len(full_text), "cookies"
+        
+        except Exception as e:
+            st.warning(f"⚠️ Method 2 failed: {str(e)}")
+    
+    # Strategy 3: Try auto-generated transcript in different languages
+    try:
+        st.info("🔄 Trying auto-generated transcripts (Method 3)...")
+        transcript_list_obj = YouTubeTranscriptApi.list_transcripts(video_id)
+        
+        # Try to get any available transcript
+        for transcript in transcript_list_obj:
+            try:
+                transcript_data = transcript.fetch()
+                full_text = " ".join([item['text'] for item in transcript_data])
+                return full_text, len(full_text), "auto_generated"
+            except:
+                continue
+    
+    except Exception as e:
+        st.warning(f"⚠️ Method 3 failed: {str(e)}")
+    
+    # If all methods fail
+    raise RequestBlocked(
+        "All transcript fetch methods failed. Possible solutions:\n"
+        "1. Try a different video from the same channel\n"
+        "2. Add youtube_cookies.txt file (export from browser)\n"
+        "3. Use a VPN or proxy to change your IP\n"
+        "4. Wait 10-15 minutes and try again (temporary IP ban)"
+    )
 
-Your task is to analyze YouTube creator content and generate professional sponsorship pitches that match them with ideal SaaS companies.
+def analyze_with_improved_claude(transcript, video_count=1):
+    """
+    Enhanced Claude prompt for better pitch quality
+    - More nuanced analysis
+    - Better company matching logic
+    - Realistic pricing
+    - Actionable strategies
+    """
+    
+    # Get formatted SaaS database
+    saas_companies_text = format_for_claude_prompt()
+    
+    system_prompt = f"""You are an elite talent manager and sponsorship strategist with 10+ years experience in creator partnerships. You've negotiated deals worth $50M+ across YouTube, Twitch, and Instagram.
 
-**SaaS COMPANIES DATABASE:**
-{SAAS_COMPANIES}
+**YOUR MISSION:**
+Analyze YouTube creator content and generate professional sponsorship pitches that match them with perfect SaaS partners from our database.
+
+**50+ SAAS COMPANIES DATABASE (ALL NICHES):**
+{saas_companies_text}
 
 **ANALYSIS FRAMEWORK:**
-1. **Creator Profile**: Identify their niche, content style, expertise level, and unique value proposition
-2. **Audience Analysis**: Determine viewer demographics, technical level, pain points, and purchasing intent
-3. **Company Matching**: Match 2-3 SaaS companies from the database that align with creator's content and audience needs
-4. **Pitch Strategy**: Create compelling narratives explaining why each match is perfect
+
+1. **Deep Creator Profiling**
+   - Content niche (be specific - not just "tech" but "Python tutorials for beginners")
+   - Teaching/presentation style (energetic, calm, technical, beginner-friendly)
+   - Production quality (matters for brand alignment)
+   - Unique differentiators (what makes them special)
+   - Upload consistency and channel trajectory
+
+2. **Sophisticated Audience Analysis**
+   - Demographic inference from content style and topic
+   - Career stage (students, career-changers, professionals)
+   - Purchase intent (how likely to buy B2B SaaS)
+   - Geographic hints from language/references
+   - Pain points mentioned or implied in content
+
+3. **Intelligent Company Matching**
+   - Match 3 companies from database using these criteria:
+     * Content-product alignment (must be natural fit)
+     * Audience-customer overlap (ICP match)
+     * Integration potential (can it be demo'd organically?)
+     * Competitive positioning (avoid if competitor already sponsors)
+   - Assign realistic fit scores (most are 3-4 stars, only perfect matches get 5)
+   - Consider creator size (pricing tier adjustment)
+
+4. **Strategic Pitch Construction**
+   - Lead with data-driven insights
+   - Highlight mutual value (not just what creator gets)
+   - Provide specific integration examples from their content
+   - Realistic pricing based on: channel size, engagement, niche, production quality
 
 **OUTPUT STRUCTURE:**
-Generate a response in this EXACT format:
 
 ---
 ## 🎯 CREATOR PROFILE
-**Channel Name**: [Extract from content]
-**Content Niche**: [e.g., Web Development, AI/ML, DevOps, Career Advice]
-**Technical Level**: [Beginner-friendly / Intermediate / Advanced]
-**Content Style**: [Tutorial-based / Project-based / Career Guidance / News & Analysis]
-**Unique Value Proposition**: [What makes this creator stand out]
+
+**Channel Name**: [Extract from content or say "Unknown Channel"]
+**Content Niche**: [Be hyper-specific - e.g. "Frontend web development for React beginners" not "web dev"]
+**Technical Level**: [Beginner-friendly / Intermediate / Advanced / Mixed]
+**Content Style**: [e.g. "Fast-paced tutorial walkthroughs", "Calm explanatory", "Energetic project builds"]
+**Production Quality**: [Basic / Professional / Premium] - matters for brand alignment
+**Unique Value Proposition**: [2-3 sentences on what makes them different]
+**Channel Trajectory**: [Growing / Stable / Declining - based on content patterns]
 
 ---
 ## 👥 AUDIENCE ANALYSIS
+
 **Primary Demographics**:
-- Age range: [estimate]
-- Career stage: [students/junior/mid-level/senior]
-- Geographic focus: [primary regions]
+- Age range: [Educated estimate based on content complexity]
+- Career stage: [e.g. "50% students, 30% junior devs, 20% career changers"]
+- Geographic focus: [Based on language, cultural references, time zones mentioned]
+- Income level: [Relevant for purchase power]
 
-**Audience Pain Points**:
-1. [Key problem #1]
-2. [Key problem #2]
-3. [Key problem #3]
+**Audience Pain Points** (from video content):
+1. [Specific pain point mentioned or implied]
+2. [Second pain point with context]
+3. [Third pain point]
 
-**Purchasing Intent**: [Low/Medium/High] - [Brief explanation]
+**Purchase Intent**: [Low/Medium/High] - **[2 sentence justification]**
+
+**Engagement Signals**: [Comment patterns, question types, emotional reactions visible in content]
 
 ---
 ## 🏆 TOP SAAS MATCHES
 
 ### Match #1: [Company Name]
-**Fit Score**: ⭐⭐⭐⭐⭐ (X/5)
+**Fit Score**: ⭐⭐⭐⭐⭐ (X/5) - [Brief justification for score]
 
 **Why This Works**:
-[2-3 sentences explaining the perfect alignment between creator's content, audience needs, and this product]
+[3-4 sentences with SPECIFIC examples from their content. Reference actual topics/problems discussed in the video. Explain product-content alignment and audience-customer fit.]
 
 **Integration Ideas**:
-1. [Specific sponsorship angle #1]
-2. [Specific sponsorship angle #2]
+1. **"[Catchy Video Title Idea]"** - [30-word description of how to naturally integrate product into content. Make it feel organic, not ad-like.]
+2. **"[Second Integration Angle]"** - [Alternative approach if first doesn't fit their style]
 
-**Estimated Partnership Value**: $[range] per video or $[range] for series
+**Expected Performance**: [Views estimate], [CTR estimate], [Conversion estimate]
+
+**Estimated Partnership Value**: 
+- Single video: $[range]
+- 4-6 video series: $[range]
+- Affiliate-only: [commission % + estimated earnings]
+
+**Negotiation Tip**: [One specific leverage point for this company]
 
 ---
 ### Match #2: [Company Name]
-[Same structure as Match #1]
+[Same structure]
 
 ---
 ### Match #3: [Company Name]
-[Same structure as Match #1]
+[Same structure]
 
 ---
 ## 📧 OUTREACH EMAIL TEMPLATE
 
-Subject: Partnership Opportunity: [Creator Name] x [Company Name]
+**Subject**: [Compelling subject line with hook]
 
-[Generate a professional 150-200 word email that the creator can send to the company's partnership team. Include specific data points from the analysis and explain mutual value.]
+[Write 180-220 word email that:]
+- Opens with specific observation about creator's content (shows you watched)
+- Bridges to company's product value prop
+- Includes 1-2 data points (views, engagement, audience demographics)
+- Proposes specific content concept (not generic "we'd love to work with you")
+- Clear CTA with next step
+- Professional but warm tone
+
+**Send to**: partnerships@[company].com or use LinkedIn to find Partnership Manager
 
 ---
-## 💡 PRO TIPS FOR THIS CREATOR
-1. [Actionable sponsorship strategy tip #1]
-2. [Actionable sponsorship strategy tip #2]
-3. [Actionable sponsorship strategy tip #3]
+## 💡 STRATEGIC RECOMMENDATIONS
+
+**For This Creator:**
+1. [Specific actionable tip about their sponsorship positioning]
+2. [Content angle that would attract sponsors]
+3. [Pricing strategy for their channel size/niche]
+
+**Red Flags to Avoid:**
+- [Company types that would be bad fit]
+- [Common mistakes for their niche]
+
+**Growth Opportunities:**
+- [How to increase sponsorship value]
+
+---
+## 📊 COMPETITIVE LANDSCAPE
+
+**Similar Channels Doing Sponsorships:**
+[If you can infer from content, mention 2-3 comparable creators and what sponsors they work with]
+
+**Market Rate Context:**
+Channels in this niche with [size estimate] typically command $[range] per integration.
 
 ---
 
 **CRITICAL RULES:**
-- Base ALL analysis on actual content from the transcript
-- Only recommend companies from the provided SaaS database
-- Be specific with examples from their content
-- Provide realistic pricing estimates
-- Keep fit scores honest (not everything is 5/5)
-"""
+- Be HONEST with fit scores - 5/5 is rare, most are 3-4
+- Base ALL analysis on actual transcript content
+- NO generic recommendations - everything must be specific to this creator
+- Realistic pricing - don't oversell or undersell
+- Only recommend companies from our database
+- If transcript is unclear, say so - don't make up details
+- Consider creator size when pricing (small channel ≠ huge rates)
+- Integration ideas must be NATURAL to their content style
+
+**PRICING CONTEXT:**
+- Nano (1K-10K subs): $500-$2K per video
+- Micro (10K-50K subs): $1.5K-$4K per video
+- Mid (50K-250K subs): $3K-$8K per video
+- Macro (250K-1M subs): $6K-$15K per video
+- Mega (1M+ subs): $10K-$50K+ per video
+
+Adjust based on: niche (B2B tech = premium), engagement rate, production quality, brand safety."""
 
     client = Anthropic(api_key=api_key)
     
     message = client.messages.create(
         model="claude-sonnet-4-5-20250929",
-        max_tokens=4000,
+        max_tokens=8000,  # Increased for detailed output
         system=system_prompt,
         messages=[{
             "role": "user", 
-            "content": f"""Analyze this YouTube video transcript(s) and generate a sponsorship pitch:
+            "content": f"""Analyze this YouTube video transcript(s) and generate a comprehensive sponsorship pitch.
 
-**Number of videos analyzed**: {video_count}
-**Total transcript length**: {len(transcript)} characters
+**ANALYSIS CONTEXT:**
+- Number of videos: {video_count}
+- Total transcript length: {len(transcript):,} characters
+- Your task: Deep analysis → Company matches → Pitch strategy
 
 **TRANSCRIPT:**
-{transcript[:50000]}  # Increased limit to ~50K chars to handle longer videos
+{transcript[:80000]}
 
-Generate the structured sponsorship analysis following the exact format provided."""
+**INSTRUCTIONS:**
+1. Read the ENTIRE transcript carefully
+2. Identify creator's niche, style, and audience
+3. Match with 3 BEST companies from our 50+ company database
+4. Generate professional pitch following the exact structure
+5. Be specific, realistic, and actionable
+
+Generate the analysis now."""
         }]
     )
     
     return message.content[0].text
 
-# UI Layout
+# ============================================
+# MAIN UI
+# ============================================
+
+# Sidebar
+with st.sidebar:
+    st.markdown("## 🚀 Features")
+    st.markdown("""
+    ✅ **50+ SaaS Companies** (all niches)  
+    ✅ **Smart IP blocking workaround**  
+    ✅ **Full transcript analysis**  
+    ✅ **Multi-video support**  
+    ✅ **Realistic pricing**  
+    ✅ **Ready-to-send emails**  
+    ✅ **Strategic recommendations**
+    """)
+    
+    st.markdown("---")
+    st.markdown("## 📊 Database Coverage")
+    
+    # Show niche categories
+    categories = {}
+    for company in SAAS_DATABASE.values():
+        cat = company['category']
+        categories[cat] = categories.get(cat, 0) + 1
+    
+    for category, count in sorted(categories.items(), key=lambda x: x[1], reverse=True):
+        st.markdown(f"**{category}**: {count} companies")
+    
+    st.markdown("---")
+    st.markdown("## 💰 Monetization")
+    st.markdown("""
+    **Use this tool to**:
+    - Offer sponsorship consulting ($500-2K/pitch)
+    - Create sponsorship marketplace
+    - Build creator management agency
+    - Sell access as SaaS ($99-299/mo)
+    """)
+    
+    st.markdown("---")
+    st.markdown("### 🔒 Privacy")
+    st.caption("Transcripts processed via Claude API. No permanent storage.")
+
+# Main content area
 col1, col2 = st.columns([2, 1])
 
 with col1:
     st.markdown("### 🎬 Video Input")
     video_urls = st.text_area(
-        "Paste YouTube Video URL(s) - one per line for multi-video analysis",
-        placeholder="https://www.youtube.com/watch?v=...\nhttps://www.youtube.com/watch?v=...",
-        height=100
+        "Paste YouTube Video URL(s) - One per line",
+        placeholder="https://www.youtube.com/watch?v=...\nhttps://www.youtube.com/watch?v=...\nhttps://www.youtube.com/watch?v=...",
+        height=120,
+        help="Analyze multiple videos for better channel insights"
+    )
+
+with col2:
+    st.markdown("### ⚙️ Advanced Options")
+    use_cookies = st.checkbox(
+        "Enable cookie fallback",
+        value=False,
+        help="Use cookies if direct API fails (requires youtube_cookies.txt)"
     )
     
-with col2:
-    st.markdown("### ⚙️ Settings")
-    include_metadata = st.checkbox("Include video metadata", value=True)
-    st.info("💡 Analyzing multiple videos provides better creator insights!")
+    show_debug = st.checkbox("Show debug info", value=False)
+
+# Info boxes
+col_a, col_b, col_c = st.columns(3)
+with col_a:
+    st.info("💡 **Tip**: Analyze 3-5 recent videos for best results")
+with col_b:
+    st.info("🌍 **Global**: Covers all content niches & regions")
+with col_c:
+    st.info("🎯 **Smart**: 50+ SaaS companies, auto-matched")
 
 # Generate Button
-if st.button("🚀 Generate Sponsorship Pitch", type="primary", use_container_width=True):
+if st.button("🚀 Generate Professional Pitch", type="primary", use_container_width=True):
     
     urls = [url.strip() for url in video_urls.split('\n') if url.strip()]
     
@@ -205,103 +415,147 @@ if st.button("🚀 Generate Sponsorship Pitch", type="primary", use_container_wi
         st.error("⚠️ Please enter at least one YouTube video URL")
         st.stop()
     
+    # Validate URLs
+    valid_urls = []
+    for url in urls:
+        video_id = extract_video_id(url)
+        if video_id:
+            valid_urls.append((url, video_id))
+        else:
+            st.warning(f"⚠️ Invalid URL (skipped): {url}")
+    
+    if not valid_urls:
+        st.error("❌ No valid YouTube URLs found")
+        st.stop()
+    
     try:
-        with st.spinner('🔍 Analyzing creator content...'):
+        # Progress tracking
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        all_transcripts = []
+        total_chars = 0
+        fetch_methods = []
+        
+        status_text.text(f"📥 Fetching transcripts from {len(valid_urls)} video(s)...")
+        
+        # Fetch transcripts
+        for idx, (url, video_id) in enumerate(valid_urls):
+            progress = (idx + 1) / (len(valid_urls) + 1)
+            progress_bar.progress(progress)
+            status_text.text(f"📥 Fetching transcript {idx+1}/{len(valid_urls)}... Video ID: {video_id}")
             
-            # Progress tracking
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            all_transcripts = []
-            total_chars = 0
-            
-            # Fetch transcripts for all videos
-            for idx, url in enumerate(urls):
-                status_text.text(f"📥 Fetching transcript {idx+1}/{len(urls)}...")
-                progress_bar.progress((idx + 1) / (len(urls) + 1))
-                
-                video_id = extract_video_id(url)
-                if not video_id:
-                    st.warning(f"⚠️ Could not extract video ID from: {url}")
-                    continue
-                
-                transcript, char_count = get_full_transcript(video_id)
-                all_transcripts.append(f"--- VIDEO {idx+1} ---\n{transcript}")
+            try:
+                transcript, char_count, method = get_full_transcript_with_fallback(video_id, use_cookies)
+                all_transcripts.append(f"--- VIDEO {idx+1} (ID: {video_id}) ---\n{transcript}")
                 total_chars += char_count
+                fetch_methods.append(method)
+                
+                st.success(f"✅ Video {idx+1} fetched successfully ({char_count:,} chars) via {method}")
             
-            if not all_transcripts:
-                st.error("❌ Failed to fetch any transcripts. Please check your URLs.")
-                st.stop()
-            
-            # Combine all transcripts
-            combined_transcript = "\n\n".join(all_transcripts)
-            
-            # Display stats
-            st.success(f"✅ Successfully analyzed {len(all_transcripts)} video(s)")
-            col_a, col_b, col_c = st.columns(3)
-            col_a.metric("Videos Analyzed", len(all_transcripts))
-            col_b.metric("Total Characters", f"{total_chars:,}")
-            col_c.metric("Estimated Words", f"{total_chars//5:,}")
-            
-            # Analyze with Claude
-            status_text.text("🤖 Generating AI-powered sponsorship pitch...")
-            progress_bar.progress(0.9)
-            
-            pitch = analyze_with_claude(combined_transcript, len(all_transcripts))
-            
-            progress_bar.progress(1.0)
-            status_text.text("✅ Analysis complete!")
-            
-            # Display results
-            st.markdown("---")
-            st.markdown("## 📊 Sponsorship Pitch Analysis")
-            st.markdown(pitch)
-            
-            # Download button
+            except Exception as e:
+                st.error(f"❌ Video {idx+1} failed: {str(e)}")
+                if show_debug:
+                    st.code(traceback.format_exc())
+        
+        if not all_transcripts:
+            st.error("❌ Failed to fetch any transcripts. See errors above.")
+            st.info("""
+            **Troubleshooting Tips:**
+            1. Try videos from a different channel
+            2. Wait 10-15 minutes if IP blocked
+            3. Enable 'cookie fallback' option
+            4. Use a VPN to change your IP address
+            5. Some videos have transcripts disabled
+            """)
+            st.stop()
+        
+        # Combine transcripts
+        combined_transcript = "\n\n".join(all_transcripts)
+        
+        # Display stats
+        st.success(f"✅ Successfully fetched {len(all_transcripts)}/{len(valid_urls)} video(s)")
+        
+        stat_col1, stat_col2, stat_col3, stat_col4 = st.columns(4)
+        stat_col1.metric("Videos Analyzed", len(all_transcripts))
+        stat_col2.metric("Total Characters", f"{total_chars:,}")
+        stat_col3.metric("Estimated Words", f"{total_chars//5:,}")
+        stat_col4.metric("Companies in DB", len(SAAS_DATABASE))
+        
+        # Analyze with Claude
+        status_text.text("🤖 Analyzing with Claude Sonnet 4.5... (this may take 20-40 seconds)")
+        progress_bar.progress(0.8)
+        
+        pitch = analyze_with_improved_claude(combined_transcript, len(all_transcripts))
+        
+        progress_bar.progress(1.0)
+        status_text.text("✅ Analysis complete!")
+        
+        # Display results
+        st.markdown("---")
+        st.markdown("# 📊 Professional Sponsorship Pitch")
+        st.markdown(pitch)
+        
+        # Action buttons
+        col_download, col_copy = st.columns(2)
+        
+        with col_download:
             st.download_button(
-                label="📥 Download Pitch as Markdown",
+                label="📥 Download as Markdown",
                 data=pitch,
-                file_name=f"sponsorship_pitch_{video_id}.md",
-                mime="text/markdown"
+                file_name=f"pitch_{valid_urls[0][1]}.md",
+                mime="text/markdown",
+                use_container_width=True
             )
-            
+        
+        with col_copy:
+            st.code(pitch, language="markdown")
+        
+        # Debug info
+        if show_debug:
+            with st.expander("🔍 Debug Information"):
+                st.json({
+                    "videos_attempted": len(valid_urls),
+                    "videos_successful": len(all_transcripts),
+                    "total_characters": total_chars,
+                    "fetch_methods": fetch_methods,
+                    "companies_in_db": len(SAAS_DATABASE),
+                    "transcript_preview": combined_transcript[:500]
+                })
+        
     except Exception as e:
-        st.error(f"❌ Error: {type(e).__name__}: {str(e)}")
-        with st.expander("🔍 Show error details"):
+        st.error(f"❌ Error: {type(e).__name__}")
+        st.error(str(e))
+        
+        with st.expander("🔍 Full Error Details"):
             st.code(traceback.format_exc())
+        
+        # Helpful suggestions based on error type
+        if "RequestBlocked" in str(type(e).__name__):
+            st.warning("""
+            **Your IP is blocked by YouTube.** Solutions:
+            
+            1. **Wait 10-15 minutes** - Temporary blocks usually expire
+            2. **Use VPN** - Change your IP address
+            3. **Enable cookies** - Check 'Enable cookie fallback' option
+            4. **Try different videos** - Some channels are less restricted
+            5. **Deploy locally** - Run on your home network instead of cloud
+            """)
+        
+        elif "TranscriptsDisabled" in str(e) or "NoTranscriptFound" in str(e):
+            st.warning("""
+            **This video has no transcript.**
+            
+            - Creator disabled captions
+            - Try a different video from the same channel
+            - Most popular channels have transcripts enabled
+            """)
 
-# Sidebar with info
-with st.sidebar:
-    st.markdown("## 📖 How It Works")
-    st.markdown("""
-    1. **Paste URL(s)**: Add one or more YouTube video links
-    2. **Full Analysis**: Analyzes entire video transcripts (no truncation)
-    3. **AI Matching**: Matches creators with ideal SaaS sponsors
-    4. **Structured Output**: Professional pitch ready to send
-    """)
-    
-    st.markdown("---")
-    st.markdown("## 🎯 What's New")
-    st.markdown("""
-    ✅ **Full transcript analysis** (no 6000 char limit)  
-    ✅ **Multi-video support** (analyze creator's channel)  
-    ✅ **SaaS company matching** (from your research)  
-    ✅ **Structured pitch format** (consistent output)  
-    ✅ **No cookie dependency** (more reliable)  
-    ✅ **Realistic pricing estimates**  
-    ✅ **Ready-to-send email templates**
-    """)
-    
-    st.markdown("---")
-    st.markdown("## 💼 Current SaaS Database")
-    st.markdown("""
-    - Cursor (AI IDE)
-    - Vercel (Deployment + AI SDK)
-    - Supabase (Backend + Vector DB)
-    - Replit (AI App Builder)
-    - v0 by Vercel (UI Generator)
-    """)
-    
-    st.markdown("---")
-    st.markdown("### 🔒 Privacy Note")
-    st.caption("Video transcripts are processed via Claude API. No data is stored permanently.")
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: #6c757d; padding: 1rem;'>
+    <p><strong>Sponsor Scout Pro</strong> • 50+ SaaS Companies • All Content Niches</p>
+    <p>Built with Anthropic Claude Sonnet 4.5 • YouTube Transcript API</p>
+</div>
+""", unsafe_allow_html=True)
